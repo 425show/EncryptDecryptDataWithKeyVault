@@ -1,11 +1,19 @@
 ﻿using System.Text;
 using Azure;
+using Azure.Core.Cryptography;
 using Azure.Identity;
 using Azure.Security.KeyVault.Keys;
 using Azure.Security.KeyVault.Keys.Cryptography;
+using Azure.Storage;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Specialized;
 
-// vault URL could be passed as a parameter
+var StorageUri = @"https://cmdemo20210224.blob.core.windows.net/sample-data";
 var KeyVaultUrl = "https://cm-identity-kv.vault.azure.net";
+var FilePath = @"C:\Users\chmatsk\Downloads\ticket.pdf";
+var DownloadPath = @"C:\Users\chmatsk\Downloads\StorageFiles";
+var keyName = "MyEncryptionKey";
+
 // using Azure AD to support secretless authentication to Azure Key Vault
 var credentials = new ChainedTokenCredential(
                         new AzureCliCredential(),
@@ -13,9 +21,6 @@ var credentials = new ChainedTokenCredential(
                 );
 
 var client = new KeyClient(new Uri(KeyVaultUrl), credentials);
-
-//this could be parametarized as you may wish to pass different keys for different operations
-var keyName = "MyEncryptionKey";
 
 //get the key (or create one on the fly - very unlikely in a production environment)
 KeyVaultKey key;
@@ -31,13 +36,41 @@ catch (RequestFailedException ex) when (ex.Status == 404)
 //get the crypto client of the key
 var cryptoClient = client.GetCryptographyClient(key.Name, key.Properties.Version);
 
-//do the fun stuff
-var plainText = "My secret message";
-var byteData = Encoding.Unicode.GetBytes(plainText);
+var blobEncryptionOptions = new ClientSideEncryptionOptions(ClientSideEncryptionVersion.V1_0)
+{
+    KeyResolver = new KeyResolver(credentials),
+    KeyEncryptionKey = cryptoClient,
+    KeyWrapAlgorithm = KeyWrapAlgorithm.RsaOaep.ToString()
+};
 
-Console.WriteLine("Encrypting...");
-var encryptedResult = await cryptoClient.EncryptAsync(EncryptionAlgorithm.RsaOaep, byteData);
-Console.WriteLine($"Encrypted data: {Convert.ToBase64String(encryptedResult.Ciphertext)}");
-Console.WriteLine("Decrypting...");
-var decryptedResult = await cryptoClient.DecryptAsync(EncryptionAlgorithm.RsaOaep, encryptedResult.Ciphertext);
-Console.WriteLine($"Decrypted data: {Encoding.Unicode.GetString(decryptedResult.Plaintext)}");
+BlobClientOptions blobOptions = new SpecializedBlobClientOptions() 
+{
+    ClientSideEncryption = blobEncryptionOptions 
+};
+
+var containerClient = new BlobContainerClient(
+        new Uri(StorageUri), 
+        credentials,
+        blobOptions
+);
+
+var blobName = Path.GetFileName(FilePath);
+Console.WriteLine("Encrypting file and uploading to storage");
+await EncryptAndUploadData(StorageUri,FilePath, blobName);
+Console.WriteLine("Upload Complete!");
+
+Console.WriteLine("Decrypting file and downloading from storage");
+await DecryptAndDownloadData(blobName);
+Console.WriteLine("Download Complete!");
+
+async Task EncryptAndUploadData(string storageUri, string FilePath, string blobName)
+{
+    var byteData = File.ReadAllBytes(FilePath);
+    await containerClient.UploadBlobAsync(blobName, new MemoryStream(byteData)); 
+}
+
+async Task DecryptAndDownloadData(string blobName)
+{
+    var blobClient = containerClient.GetBlobClient(blobName);
+    await blobClient.DownloadToAsync(Path.Combine(DownloadPath,blobName));
+}
